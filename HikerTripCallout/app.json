@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "Trail Callout",
+    "slug": "trail-callout",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Trail Callout to detect sudden hiking stumbles and impacts."
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kinghacker9000.trailcallout"
+    },
+    "android": {
+      "package": "com.kinghacker9000.trailcallout"
+    }
+  }
+}
