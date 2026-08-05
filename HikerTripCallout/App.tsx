@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { Accelerometer } from 'expo-sensors';
+import { DeviceMotion } from 'expo-sensors';
 import * as Speech from 'expo-speech';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -14,71 +14,133 @@ import {
 } from 'react-native';
 
 type Sensitivity = 'low' | 'medium' | 'high';
+type MotionEventKind = 'trip' | 'slip';
 type SensorSubscription = { remove: () => void };
+type Vector3 = { x: number; y: number; z: number; timestamp?: number };
+type RotationRate = { alpha: number; beta: number; gamma: number; timestamp?: number };
+type MotionSample = {
+  acceleration: Vector3 | null;
+  accelerationIncludingGravity: Vector3;
+  interval: number;
+  rotationRate: RotationRate | null;
+};
 
 type DetectionProfile = {
   label: string;
-  freeFallG: number;
-  impactG: number;
-  destabilizingJerkG: number;
-  impactJerkG: number;
+  hardFreeFallG: number;
+  hardImpactG: number;
+  hardImpactJerkG: number;
+  slipLinearG: number;
+  slipJerkG: number;
+  slipRotationDps: number;
+  slipAngleDeg: number;
   windowMs: number;
+};
+
+type MotionCandidate = {
+  startedAt: number;
+  lowGSeen: boolean;
+  impactSeen: boolean;
+  accelSeen: boolean;
+  jerkSeen: boolean;
+  rotationSeen: boolean;
+  recovered: boolean;
+  counterRotationSeen: boolean;
+  angularExcursionDeg: number;
+  firstRotationVector: RotationRate | null;
 };
 
 const DETECTION_PROFILES: Record<Sensitivity, DetectionProfile> = {
   low: {
-    label: 'Fewer triggers',
-    freeFallG: 0.42,
-    impactG: 2.75,
-    destabilizingJerkG: 1.45,
-    impactJerkG: 1.5,
-    windowMs: 700,
+    label: 'Fewer false triggers',
+    hardFreeFallG: 0.42,
+    hardImpactG: 2.75,
+    hardImpactJerkG: 1.25,
+    slipLinearG: 0.95,
+    slipJerkG: 0.62,
+    slipRotationDps: 190,
+    slipAngleDeg: 30,
+    windowMs: 850,
   },
   medium: {
     label: 'Balanced',
-    freeFallG: 0.58,
-    impactG: 2.25,
-    destabilizingJerkG: 1.2,
-    impactJerkG: 1.2,
-    windowMs: 900,
+    hardFreeFallG: 0.58,
+    hardImpactG: 2.25,
+    hardImpactJerkG: 1,
+    slipLinearG: 0.72,
+    slipJerkG: 0.45,
+    slipRotationDps: 135,
+    slipAngleDeg: 22,
+    windowMs: 1050,
   },
   high: {
-    label: 'More sensitive',
-    freeFallG: 0.72,
-    impactG: 1.9,
-    destabilizingJerkG: 0.95,
-    impactJerkG: 0.9,
-    windowMs: 1100,
+    label: 'Catches smaller slides',
+    hardFreeFallG: 0.72,
+    hardImpactG: 1.9,
+    hardImpactJerkG: 0.78,
+    slipLinearG: 0.52,
+    slipJerkG: 0.32,
+    slipRotationDps: 95,
+    slipAngleDeg: 15,
+    windowMs: 1250,
   },
 };
 
-const TRIP_COOLDOWN_MS = 4500;
-const SENSOR_INTERVAL_MS = 50;
+const GRAVITY = DeviceMotion.Gravity || 9.80665;
+const SENSOR_INTERVAL_MS = 40;
+const EVENT_COOLDOWN_MS = 3200;
+const ARMING_DELAY_MS = 1400;
+const MIN_SLIP_DURATION_MS = 160;
+
+const magnitude = ({ x, y, z }: Vector3) => Math.sqrt(x * x + y * y + z * z);
+const rotationMagnitude = ({ alpha, beta, gamma }: RotationRate) =>
+  Math.sqrt(alpha * alpha + beta * beta + gamma * gamma);
+const rotationDot = (a: RotationRate, b: RotationRate) =>
+  a.alpha * b.alpha + a.beta * b.beta + a.gamma * b.gamma;
+const startCandidate = (now: number, rotationRate: RotationRate | null): MotionCandidate => ({
+  startedAt: now,
+  lowGSeen: false,
+  impactSeen: false,
+  accelSeen: false,
+  jerkSeen: false,
+  rotationSeen: false,
+  recovered: false,
+  counterRotationSeen: false,
+  angularExcursionDeg: 0,
+  firstRotationVector: rotationRate,
+});
 
 export default function App() {
   const [monitoring, setMonitoring] = useState(false);
   const [sensorAvailable, setSensorAvailable] = useState<boolean | null>(null);
   const [status, setStatus] = useState('Ready');
   const [tripCount, setTripCount] = useState(0);
+  const [slipCount, setSlipCount] = useState(0);
+  const [lastEvent, setLastEvent] = useState('—');
   const [lastCallout, setLastCallout] = useState('—');
-  const [magnitudeG, setMagnitudeG] = useState(1);
+  const [totalG, setTotalG] = useState(1);
+  const [linearG, setLinearG] = useState(0);
+  const [rotationDps, setRotationDps] = useState(0);
   const [sensitivity, setSensitivity] = useState<Sensitivity>('medium');
 
   const subscriptionRef = useRef<SensorSubscription | null>(null);
-  const candidateAtRef = useRef<number | null>(null);
-  const lastMagnitudeRef = useRef(1);
-  const lastTripAtRef = useRef(0);
+  const candidateRef = useRef<MotionCandidate | null>(null);
+  const lastTotalGRef = useRef(1);
+  const lastLinearGRef = useRef(0);
+  const lastSampleAtRef = useRef(0);
+  const lastEventAtRef = useRef(0);
+  const armedAtRef = useRef(0);
   const calloutIndexRef = useRef(0);
   const sensitivityRef = useRef<Sensitivity>('medium');
 
   useEffect(() => {
     sensitivityRef.current = sensitivity;
-    candidateAtRef.current = null;
+    candidateRef.current = null;
   }, [sensitivity]);
 
-  const playCallout = useCallback(async (source: 'trip' | 'test') => {
-    const phrases = ['Hee hee!', 'Hoo hoo!'];
-    const phrase = phrases[calloutIndexRef.current % phrases.length];
+  const playCallout = useCallback(async (source: 'event' | 'test') => {
+    const phrases = ['Hee hee!', 'Hoo hoo!'] as const;
+    const phrase = phrases[calloutIndexRef.current % phrases.length] ?? phrases[0];
     calloutIndexRef.current += 1;
 
     await Speech.stop();
@@ -86,113 +148,214 @@ export default function App() {
 
     Speech.speak(phrase, {
       rate: 1.2,
-      pitch: source === 'trip' ? 1.65 : 1.5,
+      pitch: source === 'event' ? 1.65 : 1.5,
       volume: 1,
     });
   }, []);
 
-  const registerTrip = useCallback(() => {
-    const now = Date.now();
-    if (now - lastTripAtRef.current < TRIP_COOLDOWN_MS) {
-      return;
-    }
+  const registerEvent = useCallback(
+    (kind: MotionEventKind) => {
+      const now = Date.now();
+      if (now - lastEventAtRef.current < EVENT_COOLDOWN_MS) {
+        return;
+      }
 
-    lastTripAtRef.current = now;
-    candidateAtRef.current = null;
-    setTripCount((count) => count + 1);
-    setStatus('Trip detected');
-    void playCallout('trip');
+      lastEventAtRef.current = now;
+      candidateRef.current = null;
 
-    setTimeout(() => {
-      setStatus((current) => (current === 'Trip detected' ? 'Monitoring' : current));
-    }, 1400);
-  }, [playCallout]);
+      if (kind === 'trip') {
+        setTripCount((count) => count + 1);
+        setLastEvent('Hard trip');
+        setStatus('Hard trip detected');
+      } else {
+        setSlipCount((count) => count + 1);
+        setLastEvent('Slip / slide');
+        setStatus('Slip detected');
+      }
+
+      void playCallout('event');
+
+      setTimeout(() => {
+        setStatus((current) =>
+          current === 'Hard trip detected' || current === 'Slip detected'
+            ? 'Monitoring'
+            : current,
+        );
+      }, 1500);
+    },
+    [playCallout],
+  );
 
   const processSample = useCallback(
-    ({ x, y, z }: { x: number; y: number; z: number }) => {
+    (sample: MotionSample) => {
       const now = Date.now();
-      const magnitude = Math.sqrt(x * x + y * y + z * z);
-      const jerk = Math.abs(magnitude - lastMagnitudeRef.current);
       const profile = DETECTION_PROFILES[sensitivityRef.current];
-      const candidateAt = candidateAtRef.current;
+      const measuredTotalG = magnitude(sample.accelerationIncludingGravity) / GRAVITY;
+      const measuredLinearG = sample.acceleration
+        ? magnitude(sample.acceleration) / GRAVITY
+        : Math.abs(measuredTotalG - 1);
+      const measuredRotationDps = sample.rotationRate ? rotationMagnitude(sample.rotationRate) : 0;
+      const totalJerkG = Math.abs(measuredTotalG - lastTotalGRef.current);
+      const linearJerkG = Math.abs(measuredLinearG - lastLinearGRef.current);
+      const strongestJerkG = Math.max(totalJerkG, linearJerkG);
+      const elapsedMs = lastSampleAtRef.current
+        ? Math.min(100, Math.max(10, now - lastSampleAtRef.current))
+        : SENSOR_INTERVAL_MS;
 
-      lastMagnitudeRef.current = magnitude;
-      setMagnitudeG(magnitude);
+      lastTotalGRef.current = measuredTotalG;
+      lastLinearGRef.current = measuredLinearG;
+      lastSampleAtRef.current = now;
+      setTotalG(measuredTotalG);
+      setLinearG(measuredLinearG);
+      setRotationDps(measuredRotationDps);
 
-      if (candidateAt !== null) {
-        const candidateAge = now - candidateAt;
-
-        if (
-          candidateAge <= profile.windowMs &&
-          magnitude >= profile.impactG &&
-          jerk >= profile.impactJerkG
-        ) {
-          registerTrip();
-          return;
-        }
-
-        if (candidateAge > profile.windowMs) {
-          candidateAtRef.current = null;
-        }
+      if (now < armedAtRef.current) {
+        return;
       }
 
-      const lowAcceleration = magnitude <= profile.freeFallG;
-      const destabilizingDrop =
-        magnitude < 1.25 && jerk >= profile.destabilizingJerkG;
+      const lowG = measuredTotalG <= profile.hardFreeFallG;
+      const directImpact =
+        measuredTotalG >= profile.hardImpactG && totalJerkG >= profile.hardImpactJerkG;
+      const slipAcceleration = measuredLinearG >= profile.slipLinearG;
+      const slipJerk = strongestJerkG >= profile.slipJerkG;
+      const fastRotation = measuredRotationDps >= profile.slipRotationDps;
+      const possibleSlip =
+        (slipAcceleration && measuredRotationDps >= profile.slipRotationDps * 0.6) ||
+        (fastRotation && strongestJerkG >= profile.slipJerkG * 0.65);
 
-      if (lowAcceleration || destabilizingDrop) {
-        candidateAtRef.current = now;
+      if (!candidateRef.current && (lowG || directImpact || possibleSlip)) {
+        candidateRef.current = startCandidate(now, sample.rotationRate);
+      }
+
+      const candidate = candidateRef.current;
+      if (!candidate) {
+        return;
+      }
+
+      const ageMs = now - candidate.startedAt;
+      candidate.lowGSeen ||= lowG;
+      candidate.impactSeen ||= directImpact;
+      candidate.accelSeen ||= slipAcceleration;
+      candidate.jerkSeen ||= slipJerk;
+      candidate.rotationSeen ||= fastRotation;
+      candidate.angularExcursionDeg += measuredRotationDps * (elapsedMs / 1000);
+
+      if (!candidate.firstRotationVector && sample.rotationRate && measuredRotationDps > 1) {
+        candidate.firstRotationVector = sample.rotationRate;
+      }
+
+      if (
+        candidate.firstRotationVector &&
+        sample.rotationRate &&
+        rotationMagnitude(candidate.firstRotationVector) >= profile.slipRotationDps * 0.55 &&
+        measuredRotationDps >= profile.slipRotationDps * 0.45 &&
+        rotationDot(candidate.firstRotationVector, sample.rotationRate) < 0
+      ) {
+        candidate.counterRotationSeen = true;
+      }
+
+      if (
+        ageMs >= MIN_SLIP_DURATION_MS &&
+        candidate.rotationSeen &&
+        measuredRotationDps <= profile.slipRotationDps * 0.42
+      ) {
+        candidate.recovered = true;
+      }
+
+      const hardTripConfirmed =
+        candidate.impactSeen &&
+        (candidate.lowGSeen || candidate.rotationSeen || (candidate.accelSeen && candidate.jerkSeen));
+
+      if (hardTripConfirmed) {
+        registerEvent('trip');
+        return;
+      }
+
+      const slipConfirmed =
+        candidate.accelSeen &&
+        candidate.jerkSeen &&
+        candidate.rotationSeen &&
+        (candidate.angularExcursionDeg >= profile.slipAngleDeg ||
+          candidate.counterRotationSeen) &&
+        (candidate.recovered || candidate.counterRotationSeen);
+
+      if (ageMs >= MIN_SLIP_DURATION_MS && slipConfirmed) {
+        registerEvent('slip');
+        return;
+      }
+
+      if (ageMs > profile.windowMs) {
+        const strongUnrecoveredSlip =
+          candidate.accelSeen &&
+          candidate.jerkSeen &&
+          candidate.rotationSeen &&
+          candidate.angularExcursionDeg >= profile.slipAngleDeg * 1.4;
+
+        if (strongUnrecoveredSlip) {
+          registerEvent('slip');
+        } else {
+          candidateRef.current = null;
+        }
       }
     },
-    [registerTrip],
+    [registerEvent],
   );
 
   const stopMonitoring = useCallback(() => {
     subscriptionRef.current?.remove();
     subscriptionRef.current = null;
-    candidateAtRef.current = null;
-    lastMagnitudeRef.current = 1;
+    candidateRef.current = null;
+    lastTotalGRef.current = 1;
+    lastLinearGRef.current = 0;
+    lastSampleAtRef.current = 0;
     setMonitoring(false);
     setStatus('Paused');
   }, []);
 
   const startMonitoring = useCallback(async () => {
     try {
-      const available = await Accelerometer.isAvailableAsync();
+      const available = await DeviceMotion.isAvailableAsync();
       setSensorAvailable(available);
 
       if (!available) {
-        setStatus('Accelerometer unavailable');
+        setStatus('Motion sensors unavailable');
         Alert.alert(
-          'Accelerometer unavailable',
-          'Use a physical Android or iPhone device with an accelerometer.',
+          'Motion sensors unavailable',
+          'Use a physical Android or iPhone with motion and rotation sensors.',
         );
         return;
       }
 
-      const permission = await Accelerometer.requestPermissionsAsync();
+      const permission = await DeviceMotion.requestPermissionsAsync();
       if (!permission.granted) {
         setStatus('Motion permission denied');
         Alert.alert(
           'Motion permission needed',
-          'Enable motion access in system settings so the app can detect trips.',
+          'Enable motion access in system settings so the app can detect trips and slides.',
         );
         return;
       }
 
       subscriptionRef.current?.remove();
-      candidateAtRef.current = null;
-      lastMagnitudeRef.current = 1;
-      Accelerometer.setUpdateInterval(SENSOR_INTERVAL_MS);
-      subscriptionRef.current = Accelerometer.addListener(processSample);
+      candidateRef.current = null;
+      lastTotalGRef.current = 1;
+      lastLinearGRef.current = 0;
+      lastSampleAtRef.current = 0;
+      armedAtRef.current = Date.now() + ARMING_DELAY_MS;
+      DeviceMotion.setUpdateInterval(SENSOR_INTERVAL_MS);
+      subscriptionRef.current = DeviceMotion.addListener((sample) => processSample(sample));
       setMonitoring(true);
-      setStatus('Monitoring');
+      setStatus('Calibrating…');
+
+      setTimeout(() => {
+        setStatus((current) => (current === 'Calibrating…' ? 'Monitoring' : current));
+      }, ARMING_DELAY_MS);
     } catch (error) {
       setMonitoring(false);
-      setStatus('Could not start sensor');
+      setStatus('Could not start sensors');
       Alert.alert(
         'Sensor error',
-        error instanceof Error ? error.message : 'Unable to start the accelerometer.',
+        error instanceof Error ? error.message : 'Unable to start device motion sensors.',
       );
     }
   }, [processSample]);
@@ -225,22 +388,22 @@ export default function App() {
       <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.hero}>
-          <Text style={styles.eyebrow}>HIKING SAFETY EXPERIMENT</Text>
+          <Text style={styles.eyebrow}>HIKING MOTION EXPERIMENT</Text>
           <Text style={styles.title}>Trail Callout</Text>
           <Text style={styles.subtitle}>
-            Detects a stumble-and-impact pattern and answers with a playful vocal callout.
+            Uses fused acceleration and rotation data to catch hard trips plus smaller slips and slides.
           </Text>
         </View>
 
         <View style={styles.statusCard}>
-          <View>
+          <View style={styles.statusCopy}>
             <Text style={styles.label}>Detector</Text>
             <Text style={styles.status}>{status}</Text>
           </View>
           <Switch
             value={monitoring}
             onValueChange={handleMonitoringChange}
-            accessibilityLabel="Toggle trip detection"
+            accessibilityLabel="Toggle trip and slip detection"
             trackColor={{ false: '#415044', true: '#8dd694' }}
             thumbColor="#f7fff7"
           />
@@ -249,18 +412,37 @@ export default function App() {
         <View style={styles.metricsRow}>
           <View style={styles.metricCard}>
             <Text style={styles.metricValue}>{tripCount}</Text>
-            <Text style={styles.metricLabel}>Trips detected</Text>
+            <Text style={styles.metricLabel}>Hard trips</Text>
           </View>
           <View style={styles.metricCard}>
-            <Text style={styles.metricValue}>{magnitudeG.toFixed(2)}g</Text>
-            <Text style={styles.metricLabel}>Acceleration</Text>
+            <Text style={styles.metricValue}>{slipCount}</Text>
+            <Text style={styles.metricLabel}>Slips / slides</Text>
           </View>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionTitle}>Live motion</Text>
+          <View style={styles.liveRow}>
+            <View style={styles.liveMetric}>
+              <Text style={styles.liveValue}>{totalG.toFixed(2)}g</Text>
+              <Text style={styles.liveLabel}>Total force</Text>
+            </View>
+            <View style={styles.liveMetric}>
+              <Text style={styles.liveValue}>{linearG.toFixed(2)}g</Text>
+              <Text style={styles.liveLabel}>Body motion</Text>
+            </View>
+            <View style={styles.liveMetric}>
+              <Text style={styles.liveValue}>{Math.round(rotationDps)}°/s</Text>
+              <Text style={styles.liveLabel}>Rotation</Text>
+            </View>
+          </View>
+          <Text style={styles.lastEvent}>Last event: {lastEvent}</Text>
         </View>
 
         <View style={styles.panel}>
           <Text style={styles.sectionTitle}>Sensitivity</Text>
           <Text style={styles.sectionDescription}>
-            Start with Balanced. Raise sensitivity only after testing with your phone secured in its hiking position.
+            Start with Balanced. High is intended for small slides, but it will also react more often to running, scrambling, and a loose phone.
           </Text>
 
           <View style={styles.segmentedControl}>
@@ -299,14 +481,21 @@ export default function App() {
         </View>
 
         <View style={styles.notice}>
+          <Text style={styles.noticeTitle}>Secure the phone</Text>
+          <Text style={styles.noticeText}>
+            Keep it snug against your body in the same pocket or mount each time. A phone bouncing freely in a backpack can look exactly like a slip.
+          </Text>
+        </View>
+
+        <View style={styles.notice}>
           <Text style={styles.noticeTitle}>Important</Text>
           <Text style={styles.noticeText}>
-            This is a novelty prototype, not a fall detector or emergency device. Accelerometer-only detection can miss real incidents or trigger during jumps, running, or phone drops.
+            This is a novelty prototype, not a fall detector or emergency device. Phone-only heuristics can miss real incidents and can trigger during jumps, running, climbing, or deliberate phone movement.
           </Text>
         </View>
 
         <Text style={styles.footer}>
-          Sensor: {sensorAvailable === null ? 'not checked' : sensorAvailable ? 'available' : 'unavailable'}
+          Device motion: {sensorAvailable === null ? 'not checked' : sensorAvailable ? 'available' : 'unavailable'}
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -355,6 +544,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     padding: 20,
   },
+  statusCopy: {
+    flex: 1,
+    paddingRight: 16,
+  },
   label: {
     color: '#9fb9a4',
     fontSize: 13,
@@ -375,7 +568,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#e6f2e5',
     borderRadius: 20,
     flex: 1,
-    minHeight: 120,
+    minHeight: 112,
     padding: 18,
   },
   metricValue: {
@@ -404,6 +597,32 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
     marginTop: 6,
+  },
+  liveRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 16,
+  },
+  liveMetric: {
+    backgroundColor: '#102619',
+    borderRadius: 14,
+    flex: 1,
+    padding: 12,
+  },
+  liveValue: {
+    color: '#d9ffdc',
+    fontSize: 17,
+    fontWeight: '900',
+  },
+  liveLabel: {
+    color: '#91ae96',
+    fontSize: 11,
+    marginTop: 4,
+  },
+  lastEvent: {
+    color: '#bed0c1',
+    fontSize: 13,
+    marginTop: 14,
   },
   segmentedControl: {
     gap: 8,
