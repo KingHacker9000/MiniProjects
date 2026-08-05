@@ -2,14 +2,14 @@
   "expo": {
     "name": "Trail Callout",
     "slug": "trail-callout",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "plugins": [
       [
         "expo-sensors",
         {
-          "motionPermission": "Allow Trail Callout to detect sudden hiking stumbles and impacts."
+          "motionPermission": "Allow Trail Callout to use acceleration and rotation data to detect hiking trips and slides."
         }
       ]
     ],
