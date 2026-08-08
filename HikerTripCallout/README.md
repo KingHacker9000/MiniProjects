@@ -1,86 +1,85 @@
 # Trail Callout
 
-A small Expo/React Native prototype for hikers. It uses fused device-motion data to detect both:
-
-- **Hard trips:** a brief loss of support or destabilizing motion followed by an impact.
-- **Slips / slides:** a smaller acceleration burst combined with rapid rotation and a wobble, counter-rotation, or recovery.
-
-Each detected event plays alternating **“Hee hee!”** and **“Hoo hoo!”** system-generated vocal callouts.
+Trail Callout is an Expo/React Native field-testing prototype for hikers. It uses fused device motion data to detect both hard trips and smaller slips/slides, then plays a playful system-generated callout and optional haptic feedback.
 
 The repository does **not** include Michael Jackson recordings or a cloned voice. Replace the callout implementation only with audio you created or have permission to distribute.
 
-## Run it
+## What is included
 
-Requirements:
+- Fused `DeviceMotion` acceleration + rotation sensing at 25 Hz.
+- Two event classes: hard trip and slip/slide.
+- 2.5-second still calibration every time monitoring starts.
+- Adaptive slip thresholds based on measured motion noise.
+- Wear profiles for snug pocket, belt/chest mount, and backpack.
+- Low, Medium, and High sensitivity presets.
+- Confidence scoring for candidate events.
+- Persistent local event history with peak force, body acceleration, rotation, confidence, and settings used.
+- `Real event` / `False trigger` labels for field-testing feedback.
+- Separate sound and haptic toggles.
+- Safe simulation buttons for testing feedback without deliberately stumbling.
+- Screen keep-awake while monitoring so sensor tests do not stop because the display sleeps.
+- EAS development, preview/internal APK, and production build profiles.
 
-- Node.js 22.13 or newer
-- Expo Go on a physical Android or iPhone
+## Install dependencies
 
 ```bash
 cd HikerTripCallout
 npm install
-npx expo start
 ```
 
-Scan the QR code with Expo Go. Motion testing requires a physical device; simulators and web browsers are not suitable for realistic calibration.
+## Recommended development workflow
 
-## Why DeviceMotion instead of gyro alone?
+SDK 57 is set up for a project-specific Expo development build rather than relying on Expo Go.
 
-`DeviceMotion` gives the app synchronized access to:
+```bash
+npm install --global eas-cli
+eas login
+eas build:configure
+eas build --platform android --profile development
+```
 
-- acceleration with gravity,
-- linear acceleration with gravity removed, and
-- fused rotation rate in degrees per second.
+Install the generated development APK on the phone, then start Metro:
 
-Gyroscope data alone can detect a phone turning, but cannot distinguish a hiking slip from deliberately rotating the phone. The detector therefore requires multiple signals inside a short time window.
+```bash
+npm start
+```
 
-## Detection pipeline
+Open the Trail Callout development client on the phone and connect to the development server.
 
-The app samples device motion every 40 ms.
+## Standalone test APK
 
-### Hard trip
+To make a build that runs without Metro:
 
-1. Detect low total acceleration, a destabilizing burst, or a direct impact.
-2. Look for a strong impact and jerk inside the profile's time window.
-3. Confirm using additional acceleration or rotation evidence.
+```bash
+eas build --platform android --profile preview
+```
 
-### Slip / slide
+The `preview` profile produces an installable APK through EAS internal distribution.
 
-1. Detect a linear-acceleration or jerk burst.
-2. Require rapid rotation.
-3. Accumulate a meaningful angular excursion.
-4. Confirm using recovery or counter-rotation, which resembles a person correcting their balance.
+## Calibration procedure
 
-A 3.2-second cooldown prevents one stumble from producing several callouts. The app waits 1.4 seconds after activation before arming so picking up the phone does not immediately trigger it.
+1. Put the phone in the exact position you plan to use.
+2. Select the matching wear profile.
+3. Start with Medium / Balanced sensitivity.
+4. Turn monitoring on and stand still for 2.5 seconds.
+5. If the app reports a noisy fit, secure the phone more tightly and restart monitoring.
+6. Test normal walking, brisk walking, stairs, sitting, jogging, jumping, and phone handling before controlled slip-like movements.
+7. Label every genuine sensor trigger as `Real event` or `False trigger` so thresholds can be tuned from field data.
 
-## Sensitivity
+## Safe field-test matrix
 
-- **Low:** best for running, scrambling, or a phone that moves slightly in its mount.
-- **Medium:** recommended starting point.
-- **High:** intended for smaller slips and slides, with a greater risk of false triggers.
+Do not deliberately fall. Use controlled movements near a railing or open flat area.
 
-## Calibration
+- Normal walk: 3-5 minutes; target 0 triggers.
+- Brisk walk: 2 minutes; target 0 triggers.
+- Stairs: one flight up and down; target 0 triggers.
+- Sit/stand quickly: 10 repetitions; target 0 triggers.
+- Jog: 1 minute; note false positives.
+- Small hop: 5 repetitions; note false positives.
+- Controlled shoe slide with immediate recovery: 10 repetitions; target increasing detection rate on High.
+- Quick balance correction / torso catch: 10 repetitions; target detection on Medium/High.
+- Deliberate phone handling while stationary: 10 repetitions; target 0 triggers when worn snugly.
 
-1. Secure the phone snugly against your body in the exact pocket, armband, waist belt, or chest mount you will use.
-2. Start with **Medium / Balanced**.
-3. Walk normally, climb a few steps, and make ordinary phone movements. These should not trigger.
-4. Safely simulate a foot skid and quick balance correction without actually falling.
-5. Choose **High** if small test slides are missed.
-6. Choose **Low** if running, jumping, or scrambling causes false triggers.
+## Important limitations
 
-A loose phone bouncing in a backpack is not suitable: the phone's movement can be indistinguishable from the hiker slipping.
-
-## Current limitations
-
-- Thresholds are heuristic and need real-world data from different users, phones, carrying positions, and terrain.
-- The app does not know whether the phone moved with the person's torso or moved independently.
-- Foreground Expo sensor monitoring is not a replacement for a native background safety service.
-- Small slides are inherently harder to classify than falls, so sensitivity and false-positive rate trade off against each other.
-
-This is a novelty prototype, not a medical device, fall detector, or emergency alert system. Do not rely on it for personal safety.
-
-## Main dependencies
-
-- Expo SDK 57
-- `expo-sensors` / `DeviceMotion` for fused acceleration and rotation data
-- `expo-speech` for the original system-generated callouts
+This is a novelty prototype, not a medical device, certified fall detector, or emergency service. Phone-only heuristics can miss genuine incidents and can produce false positives. The current JavaScript sensor monitor is intended for foreground testing. Reliable always-on/background detection would require a native background architecture and significantly more validation.
