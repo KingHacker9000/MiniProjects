@@ -13,7 +13,7 @@ type Kind = 'trip' | 'slip';
 type Verdict = 'unreviewed' | 'real' | 'false';
 type V3 = { x: number; y: number; z: number };
 type RR = { alpha: number; beta: number; gamma: number };
-type Sample = { acceleration: V3 | null; accelerationIncludingGravity: V3; rotationRate: RR | null; interval: number };
+type Sample = { acceleration?: V3 | null; accelerationIncludingGravity?: V3 | null; rotationRate?: RR | null; interval?: number };
 type Candidate = {
   start: number; low: boolean; impact: boolean; accel: boolean; jerk: boolean; rotate: boolean;
   recover: boolean; counter: boolean; angle: number; firstRot: RR | null;
@@ -41,8 +41,8 @@ const W: Record<Wear, { label: string; factor: number; note: string }> = {
 };
 const G = DeviceMotion.Gravity || 9.80665;
 const SETTINGS = 'trail.settings.v2', EVENTS = 'trail.events.v2', KEEP = 'trail-monitor';
-const mag = (v: V3) => Math.hypot(v.x, v.y, v.z);
-const rmag = (r: RR) => Math.hypot(r.alpha, r.beta, r.gamma);
+const mag = (v: V3 | null | undefined) => v ? Math.hypot(v.x ?? 0, v.y ?? 0, v.z ?? 0) : 0;
+const rmag = (r: RR | null | undefined) => r ? Math.hypot(r.alpha ?? 0, r.beta ?? 0, r.gamma ?? 0) : 0;
 const dot = (a: RR, b: RR) => a.alpha*b.alpha + a.beta*b.beta + a.gamma*b.gamma;
 const clamp = (n: number) => Math.max(0, Math.min(99, Math.round(n)));
 const blank = (now: number, r: RR | null): Candidate => ({ start: now, low:false, impact:false, accel:false, jerk:false, rotate:false, recover:false, counter:false, angle:0, firstRot:r, peakTotal:0, peakLinear:0, peakRot:0, peakJerk:0 });
@@ -85,15 +85,17 @@ export default function App() {
   },[feedback]);
 
   const process=useCallback((sample:Sample)=>{
+    const gravity=sample?.accelerationIncludingGravity;
+    if(!gravity)return;
     const now=Date.now(), p=P[sRef.current], wf=W[wRef.current].factor;
-    const tg=mag(sample.accelerationIncludingGravity)/G, lg=sample.acceleration?mag(sample.acceleration)/G:Math.abs(tg-1), rr=sample.rotationRate?rmag(sample.rotationRate):0;
+    const tg=mag(gravity)/G, lg=sample.acceleration?mag(sample.acceleration)/G:Math.abs(tg-1), rr=rmag(sample.rotationRate);
     const tj=Math.abs(tg-lastT.current), lj=Math.abs(lg-lastL.current), jerk=Math.max(tj,lj), dt=lastAt.current?Math.min(100,Math.max(10,now-lastAt.current)):40;
     lastT.current=tg;lastL.current=lg;lastAt.current=now;setTotal(tg);setLinear(lg);setRotation(rr);
     if(cal.current){cal.current.l=Math.max(cal.current.l,lg);cal.current.r=Math.max(cal.current.r,rr);if(now<cal.current.until)return;
       const nl=Math.max(.03,cal.current.l),nr=Math.max(4,cal.current.r);noiseLRef.current=nl;noiseRRef.current=nr;setNoiseL(nl);setNoiseR(nr);setCalibration(nl>.28||nr>55?'Noisy fit — secure phone tighter':'Calibrated');setStatus('Monitoring');cal.current=null;return;}
     const lth=Math.max(p.linear*wf,noiseLRef.current*3.2+.12), rth=Math.max(p.rotation*wf,noiseRRef.current*2.8+18);
     const low=tg<=p.free, impact=tg>=p.impact&&tj>=p.impactJerk, acc=lg>=lth, j=jerk>=p.jerk*wf, rot=rr>=rth;
-    const possible=(acc&&rr>=rth*.6)||(rot&&jerk>=p.jerk*wf*.65); if(!c.current&&(low||impact||possible))c.current=blank(now,sample.rotationRate);
+    const possible=(acc&&rr>=rth*.6)||(rot&&jerk>=p.jerk*wf*.65); if(!c.current&&(low||impact||possible))c.current=blank(now,sample.rotationRate ?? null);
     const x=c.current;if(!x){if(candidateScore)setCandidateScore(n=>Math.max(0,n-5));return} const age=now-x.start;
     x.low||=low;x.impact||=impact;x.accel||=acc;x.jerk||=j;x.rotate||=rot;x.angle+=rr*(dt/1000);x.peakTotal=Math.max(x.peakTotal,tg);x.peakLinear=Math.max(x.peakLinear,lg);x.peakRot=Math.max(x.peakRot,rr);x.peakJerk=Math.max(x.peakJerk,jerk);
     if(!x.firstRot&&sample.rotationRate&&rr>1)x.firstRot=sample.rotationRate;
