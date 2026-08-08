@@ -1,0 +1,30 @@
+{
+  "name": "hiker-trip-callout",
+  "version": "1.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "start:expo-go": "expo start --go",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "expo": "~57.0.10",
+    "expo-dev-client": "~57.0.7",
+    "expo-haptics": "~57.0.1",
+    "expo-keep-awake": "~57.0.1",
+    "expo-sensors": "~57.0.2",
+    "expo-speech": "~57.0.1",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.2"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Trail Callout",
+    "slug": "trail-callout",
+    "version": "1.1.0",
+    "scheme": "trail-callout",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "plugins": [
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow Trail Callout to detect hiking trips, slips, and balance corrections using motion sensors."
+        }
+      ],
+      "expo-dev-client"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.kinghacker9000.trailcallout"
+    },
+    "android": {
+      "package": "com.kinghacker9000.trailcallout"
+    }
+  }
+}
